@@ -2,6 +2,7 @@ import "./globals.css";
 import { Josefin_Sans } from "next/font/google";
 import Navbar from "./components/Navbar";
 import Footer from "./components/Footer";
+import Chatbot from "./components/Chatbot";
 
 const Nun = Josefin_Sans({
   subsets: ['latin'],
@@ -47,6 +48,7 @@ export default function RootLayout({
         <Navbar/>
         {children}
         <Footer/>
+  <Chatbot/>
       </body>
     </html>
   );

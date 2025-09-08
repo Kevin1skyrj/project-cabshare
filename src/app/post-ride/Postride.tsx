@@ -1,7 +1,8 @@
 "use client";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { db } from "../constants/firebase";
 import { doc, setDoc } from "firebase/firestore";
+import { normalizeRouteKey, rideToText } from "../lib/ai";
 
 const PostRide = () => {
   const [formData, setFormData] = useState({
@@ -22,11 +23,59 @@ const PostRide = () => {
     setFormData({ ...formData, [name]: value });
   };
 
+  // Hostel codes to treat as campus origin
+  const HOSTELS = ["HB", "MSS", "DBA", "GDB", "VS", "SD", "CVR", "KMS"];
+  // Google Maps place_id for NIT Rourkela (used in Gmap.tsx embed)
+  const CAMPUS_PLACE_ID = "place_id:ChIJw2HVu3IfIDoRWntq53BcqwA";
+  const resolveOrigin = (pickup: string) => {
+    const token = pickup.trim().toUpperCase();
+    // Force exact campus origin when a hostel code is provided
+    return HOSTELS.includes(token) ? CAMPUS_PLACE_ID : pickup;
+  };
+
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     try {
+      // Prepare AI embedding for better matching
+      const text = rideToText({ pickup: formData.pickup, drop: formData.drop, datetime: formData.datetime });
+      const embedRes = await fetch("/api/ai/embedding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      }).then((r) => r.json());
+
+      const embedding: number[] = Array.isArray(embedRes.embedding) ? embedRes.embedding : [];
+
+      // Compute distance/time for saving (if user didn’t pause long enough to auto-calc)
+      let distanceKm: number | null = null;
+      let durationMin: number | null = null;
+
+  if (formData.pickup && formData.drop) {
+        const origin = resolveOrigin(formData.pickup);
+        const dir = await fetch("/api/maps/directions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ origin, destination: formData.drop }),
+        }).then((r) => r.json());
+        if (!dir.error) {
+          distanceKm = dir.distanceMeters / 1000;
+          durationMin = Math.round(dir.durationSeconds / 60);
+        }
+      }
+
       const docID = `${formData.name}-${Date.now()}`;
-      await setDoc(doc(db, "rides", docID), formData);
+      const routeKey = normalizeRouteKey(formData.pickup, formData.drop);
+      await setDoc(doc(db, "rides", docID), {
+        ...formData,
+        seats: Number(formData.seats),
+        createdAt: Date.now(),
+        routeKey,
+        ai: {
+          embedding,
+          distanceKm,
+          durationMin,
+        },
+      });
       alert("Ride posted successfully!");
       setFormData({
         name: "",
@@ -43,6 +92,27 @@ const PostRide = () => {
       alert(`Failed: ${(error as Error).message}`);
     }
   };
+
+  const [suggested, setSuggested] = useState<{ distanceKm?: number; durationMin?: number }>({});
+
+  async function computeRouteSuggestion() {
+    if (!formData.pickup || !formData.drop) return;
+    const origin = resolveOrigin(formData.pickup);
+    const dirRes = await fetch("/api/maps/directions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ origin, destination: formData.drop }),
+    }).then((r) => r.json());
+    if (dirRes.error) return;
+    const distanceKm = dirRes.distanceMeters / 1000;
+    const durationMin = Math.round(dirRes.durationSeconds / 60);
+    setSuggested({ distanceKm, durationMin });
+  }
+
+  useEffect(() => {
+    computeRouteSuggestion();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [formData.pickup, formData.drop]);
 
   return (
     <div className="flex justify-center mt-20 px-4">
@@ -170,15 +240,24 @@ const PostRide = () => {
             />
           </div>
 
+          {/* AI Suggestion Box */}
+          {(suggested.distanceKm != null || suggested.durationMin != null) && (
+            <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 text-sm text-gray-700">
+              <div>
+                Distance ~ {suggested.distanceKm?.toFixed(1)} km • {suggested.durationMin} min
+              </div>
+            </div>
+          )}
+
           {/* Submit */}
           <div className="flex justify-end">
-  <button
-    type="submit"
-    className="bg-amber-600 hover:bg-amber-700 text-white font-semibold py-1 px-3 rounded-lg w-full md:w-auto transition font-small"
-  >
-    Post Ride
-  </button>
-</div>
+            <button
+              type="submit"
+              className="bg-amber-600 hover:bg-amber-700 text-white font-semibold py-1 px-3 rounded-lg w-full md:w-auto transition font-small"
+            >
+              Post Ride
+            </button>
+          </div>
         </form>
       </div>
     </div>

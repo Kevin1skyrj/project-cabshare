@@ -2,6 +2,7 @@
 import React, { useEffect, useState, useRef } from "react";
 import { db } from "../constants/firebase";
 import { collection, getDocs } from "firebase/firestore";
+import { cosineSim, rideToText } from "../lib/ai";
 
 interface Ride {
   id: string;
@@ -13,6 +14,7 @@ interface Ride {
   notes: string;
   seats: number;
 }
+type RideWithAI = Ride & { ai?: { embedding?: number[] } };
 const today = new Date().toISOString().split("T")[0];
 
 const RideList: React.FC = () => {
@@ -23,6 +25,7 @@ const RideList: React.FC = () => {
   const [selectedDate, setSelectedDate] = useState(today);
   const [selectedRide, setSelectedRide] = useState<Ride | null>(null);
   const [showAllRides, setShowAllRides] = useState<boolean>(false);
+  const [smart, setSmart] = useState<boolean>(true);
 
   // Ref for hidden date picker
   const dateInputRef = useRef<HTMLInputElement>(null);
@@ -31,10 +34,10 @@ const RideList: React.FC = () => {
     const fetchData = async () => {
       try {
         const querySnapshot = await getDocs(collection(db, "rides"));
-        const rideList: Ride[] = querySnapshot.docs.map((doc) => ({
+  const rideList: RideWithAI[] = querySnapshot.docs.map((doc) => ({
           id: doc.id,
           ...doc.data(),
-        })) as Ride[];
+  })) as RideWithAI[];
 
         setAllRides(rideList);
 
@@ -54,22 +57,48 @@ const RideList: React.FC = () => {
     fetchData();
   }, [showAllRides]);
 
-  const handleSearch = () => {
-    const query = searchQuery.toLowerCase().trim();
-    const date = selectedDate.trim();
+  const handleSearch = async () => {
+    if (!smart) {
+      const query = searchQuery.toLowerCase().trim();
+      const date = selectedDate.trim();
+      const filtered = allRides.filter((ride) => {
+        const matchesSearch =
+          ride.pickup.toLowerCase().includes(query) ||
+          ride.drop.toLowerCase().includes(query) ||
+          ride.name.toLowerCase().includes(query);
+        const matchesDate = date ? ride.datetime.includes(date) : true;
+        return matchesSearch && matchesDate;
+      });
+      setRides(filtered);
+      return;
+    }
 
-    const filtered = allRides.filter((ride) => {
-      const matchesSearch =
-        ride.pickup.toLowerCase().includes(query) ||
-        ride.drop.toLowerCase().includes(query) ||
-        ride.name.toLowerCase().includes(query);
-
-      const matchesDate = date ? ride.datetime.includes(date) : true;
-
-      return matchesSearch && matchesDate;
+    // Smart Match using embeddings
+    const qText = rideToText({
+      pickup: searchQuery || "",
+      drop: searchQuery || "",
+      datetime: selectedDate,
     });
-
-    setRides(filtered);
+    try {
+      const qRes = await fetch("/api/ai/embedding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: qText }),
+      }).then((r) => r.json());
+      const q: number[] = Array.isArray(qRes.embedding) ? qRes.embedding : [];
+      const ranked = [...(allRides as RideWithAI[])]
+        .map((r) => {
+          const e = r.ai?.embedding as number[] | undefined;
+          const sim = e?.length ? cosineSim(q, e) : 0;
+          const dateBoost = selectedDate && r.datetime.includes(selectedDate) ? 0.05 : 0;
+          return { r, score: sim + dateBoost };
+        })
+        .sort((a, b) => b.score - a.score)
+        .map((x) => x.r);
+      setRides(ranked.slice(0, 30));
+    } catch (err) {
+      console.error("Smart search failed", err);
+    }
   };
 
   const handleDetails = (ride: Ride) => {
@@ -154,13 +183,19 @@ const RideList: React.FC = () => {
                {showAllRides ? "Show Today's Rides" : "Show All Rides"}
               </button>
            </div>
-            {/* Search button (still available) */}
+            {/* Smart toggle */}
+            <label className="flex items-center gap-2 text-sm text-gray-600">
+              <input type="checkbox" checked={smart} onChange={() => setSmart(!smart)} />
+              AI Smart Match
+            </label>
+
+            {/* Search button */}
             <button
               onClick={handleSearch}
               className="w-full md:w-auto bg-amber-600 hover:bg-amber-700 text-white 
               px-6 py-2 rounded-xl font-medium transition duration-300"
             >
-              Search
+              {smart ? "Smart Match" : "Search"}
             </button>
           </div>
         </div>
