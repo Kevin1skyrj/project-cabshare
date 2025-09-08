@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { db } from "../constants/firebase";
 import { addDoc, collection, getDocs, serverTimestamp } from "firebase/firestore";
+import { Bot, User, MessageSquare, Send, Search, Sparkles } from "lucide-react";
 
 // Combined Chatbot: two tabs
 // - Helper: teammate's ride menu/find/post flow (no external AI)
@@ -263,28 +264,39 @@ const Chatbot: React.FC = () => {
           onClick={() => setOpen(true)}
           className="rounded-full bg-amber-600 hover:bg-amber-700 text-white shadow-lg w-14 h-14 flex items-center justify-center"
           aria-label="Open CabShare Assistant"
+          title="Open CabShare Assistant"
         >
-          <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 8h10M7 12h6m-8 8l4-4h6l4 4V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12z" />
-          </svg>
+          <MessageSquare className="w-7 h-7" />
         </button>
       )}
 
       {open && (
         <div className="w-[420px] max-w-[92vw] bg-white border border-gray-200 rounded-2xl shadow-xl overflow-hidden">
           {/* Header */}
-          <div className="flex items-center justify-between p-4 bg-amber-50 border-b">
+          <div className="flex items-center justify-between p-3 bg-amber-50 border-b">
             <div>
-              <div className="text-sm text-amber-700">{headerTitle}</div>
+              <div className="text-sm text-amber-700 font-medium">{headerTitle}</div>
               <div className="text-xs text-gray-500">{tab === "helper" ? "Type 'start' to begin • type 'menu' anytime" : "Ask anything about CabShare"}</div>
             </div>
             <div className="flex items-center gap-2">
               {/* Tabs */}
               <div className="flex bg-white border rounded-lg overflow-hidden">
-                <button className={`px-3 py-1 text-xs ${tab === "helper" ? "bg-amber-100 text-amber-700" : "text-gray-600"}`} onClick={() => setTab("helper")}>
+                <button
+                  className={`px-3 py-1 text-xs flex items-center gap-1 ${tab === "helper" ? "bg-amber-100 text-amber-700" : "text-gray-600"}`}
+                  onClick={() => setTab("helper")}
+                  aria-label="Helper"
+                  title="Helper"
+                >
+                  <Search className="w-3.5 h-3.5" />
                   Helper
                 </button>
-                <button className={`px-3 py-1 text-xs ${tab === "ai" ? "bg-amber-100 text-amber-700" : "text-gray-600"}`} onClick={() => setTab("ai")}>
+                <button
+                  className={`px-3 py-1 text-xs flex items-center gap-1 ${tab === "ai" ? "bg-amber-100 text-amber-700" : "text-gray-600"}`}
+                  onClick={() => setTab("ai")}
+                  aria-label="Ask AI"
+                  title="Ask AI"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
                   Ask AI
                 </button>
               </div>
@@ -303,7 +315,19 @@ const Chatbot: React.FC = () => {
                 {/* Messages area */}
                 <div ref={scrollRef} className="max-h-40 overflow-auto space-y-2 pr-1">
                   {messages.map((m, i) => (
-                    <div key={i} className={`${m.from === "bot" ? "bg-amber-50 text-amber-900" : "bg-gray-100 text-gray-900"} px-3 py-2 rounded-lg w-fit max-w-full`}>{m.text}</div>
+                    <div key={i} className={`flex items-end gap-2 ${m.from === "bot" ? "justify-start" : "justify-end"}`}>
+                      {m.from === "bot" && (
+                        <div className="shrink-0 w-6 h-6 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center">
+                          <Bot className="w-4 h-4" />
+                        </div>
+                      )}
+                      <div className={`${m.from === "bot" ? "bg-amber-50 text-amber-900" : "bg-gray-100 text-gray-900"} px-3 py-2 rounded-lg max-w-[80%] text-sm`}>{m.text}</div>
+                      {m.from === "user" && (
+                        <div className="shrink-0 w-6 h-6 rounded-full bg-gray-200 text-gray-700 flex items-center justify-center">
+                          <User className="w-4 h-4" />
+                        </div>
+                      )}
+                    </div>
                   ))}
                 </div>
 
@@ -405,7 +429,7 @@ const Chatbot: React.FC = () => {
                 )}
 
                 {/* Chat input (helper) */}
-                <div className="flex gap-2">
+        <div className="flex gap-2">
                   <input
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
@@ -422,9 +446,11 @@ const Chatbot: React.FC = () => {
                       const inputEl = (scrollRef.current?.parentElement?.querySelector("input") as HTMLInputElement) || null;
                       if (inputEl) { const v = inputEl.value; inputEl.value = ""; handleSend(v); }
                     }}
-                    className="bg-amber-600 text-white rounded-lg px-3"
+          className="bg-amber-600 hover:bg-amber-700 text-white rounded-lg px-3 flex items-center gap-1"
+          title="Send"
                   >
-                    Send
+          <Send className="w-4 h-4" />
+          <span className="text-sm">Send</span>
                   </button>
                 </div>
               </>
@@ -434,10 +460,20 @@ const Chatbot: React.FC = () => {
               <>
                 <div ref={aiScrollRef} className="max-h-64 overflow-auto space-y-2">
                   {aiMsgs.map((m, i) => (
-                    <div key={i} className={m.role === "user" ? "text-right" : "text-left"}>
-                      <div className={`inline-block px-3 py-2 rounded-lg ${m.role === "user" ? "bg-amber-600 text-white" : "bg-gray-100"}`}>
+                    <div key={i} className={`flex items-end gap-2 ${m.role === "assistant" ? "justify-start" : "justify-end"}`}>
+                      {m.role === "assistant" && (
+                        <div className="shrink-0 w-6 h-6 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center">
+                          <Bot className="w-4 h-4" />
+                        </div>
+                      )}
+                      <div className={`${m.role === "user" ? "bg-amber-600 text-white" : "bg-gray-100 text-gray-900"} px-3 py-2 rounded-lg max-w-[80%] text-sm`}>
                         {m.content}
                       </div>
+                      {m.role === "user" && (
+                        <div className="shrink-0 w-6 h-6 rounded-full bg-gray-200 text-gray-700 flex items-center justify-center">
+                          <User className="w-4 h-4" />
+                        </div>
+                      )}
                     </div>
                   ))}
                   {aiLoading && <div className="text-gray-400 text-xs">Typing…</div>}
@@ -448,10 +484,11 @@ const Chatbot: React.FC = () => {
                     value={aiInput}
                     onChange={(e) => setAiInput(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && sendAI()}
-                    placeholder="e.g. Find a ride to station Sunday"
+                    placeholder="Ask anything… e.g. How to post a ride?"
                   />
-                  <button onClick={sendAI} className="bg-amber-600 hover:bg-amber-700 text-white px-3 rounded-lg">
-                    Send
+                  <button onClick={sendAI} className="bg-amber-600 hover:bg-amber-700 text-white px-3 rounded-lg flex items-center gap-1" title="Send">
+                    <Send className="w-4 h-4" />
+                    <span className="text-sm">Send</span>
                   </button>
                 </div>
               </>

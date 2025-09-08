@@ -23,14 +23,37 @@ const PostRide = () => {
     setFormData({ ...formData, [name]: value });
   };
 
-  // Hostel codes to treat as campus origin
-  const HOSTELS = ["HB", "MSS", "DBA", "GDB", "VS", "SD", "CVR", "KMS"];
-  // Google Maps place_id for NIT Rourkela (used in Gmap.tsx embed)
+  // Hostel codes to treat as campus origin (case-insensitive, supports variants like "sd hall")
+  const HOSTEL_CODES = ["HB", "MSS", "DBA", "GDB", "VS", "SD", "CVR", "KMS"] as const;
+  // Google Maps place_id for NIT Rourkela (Main Gate)
   const CAMPUS_PLACE_ID = "place_id:ChIJw2HVu3IfIDoRWntq53BcqwA";
+
+  const normalize = (s: string) => s
+    .toUpperCase()
+    .replace(/[^A-Z0-9 ]+/g, " ") // remove punctuation
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const looksLikeHostel = (input: string) => {
+    const norm = normalize(input);
+    if (!norm) return false;
+    const tight = norm.replace(/\s+/g, ""); // e.g., "S D" -> "SD"
+    // Generic suffixes often used
+    const suffixes = [" HALL", " HOSTEL", " BLOCK", " BHAVAN", " HSE", " HOUSE"]; // broad
+
+    for (const code of HOSTEL_CODES) {
+      if (norm === code) return true;
+      if (norm.startsWith(code + " ") || norm.endsWith(" " + code) || norm.includes(" " + code + " ")) return true;
+      if (tight.includes(code)) return true; // catches "S D" -> "SD"
+      for (const suf of suffixes) {
+        if (norm.includes(code + suf)) return true;
+      }
+    }
+    return false;
+  };
+
   const resolveOrigin = (pickup: string) => {
-    const token = pickup.trim().toUpperCase();
-    // Force exact campus origin when a hostel code is provided
-    return HOSTELS.includes(token) ? CAMPUS_PLACE_ID : pickup;
+    return looksLikeHostel(pickup) ? CAMPUS_PLACE_ID : pickup;
   };
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -265,3 +288,4 @@ const PostRide = () => {
 };
 
 export default PostRide;
+        

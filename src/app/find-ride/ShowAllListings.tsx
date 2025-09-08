@@ -1,8 +1,8 @@
 "use client";
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState } from "react";
 import { db } from "../constants/firebase";
 import { collection, getDocs } from "firebase/firestore";
-import { cosineSim, rideToText } from "../lib/ai";
+import { cosineSim, rideToText, normalizeRouteKey } from "../lib/ai";
 
 interface Ride {
   id: string;
@@ -18,37 +18,38 @@ type RideWithAI = Ride & { ai?: { embedding?: number[] } };
 const today = new Date().toISOString().split("T")[0];
 
 const RideList: React.FC = () => {
-
   const [allRides, setAllRides] = useState<Ride[]>([]);
   const [rides, setRides] = useState<Ride[]>([]);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [pickupQuery, setPickupQuery] = useState("");
+  const [dropQuery, setDropQuery] = useState("");
+  const [keywords, setKeywords] = useState("");
   const [selectedDate, setSelectedDate] = useState(today);
   const [selectedRide, setSelectedRide] = useState<Ride | null>(null);
   const [showAllRides, setShowAllRides] = useState<boolean>(false);
   const [smart, setSmart] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(false);
 
-  // Ref for hidden date picker
-  const dateInputRef = useRef<HTMLInputElement>(null);
+  // Date is managed directly via input[type=date]
+
+  // No dropdown suggestions; users will enter locations manually.
 
   useEffect(() => {
     const fetchData = async () => {
       try {
         const querySnapshot = await getDocs(collection(db, "rides"));
-  const rideList: RideWithAI[] = querySnapshot.docs.map((doc) => ({
+        const rideList: RideWithAI[] = querySnapshot.docs.map((doc) => ({
           id: doc.id,
           ...doc.data(),
-  })) as RideWithAI[];
+        })) as RideWithAI[];
 
         setAllRides(rideList);
 
-        if(showAllRides){
+        if (showAllRides) {
           setRides(rideList);
-        }else{
-      const todayRides = rideList.filter((ride) =>
-        ride.datetime.includes(today)
-      );
-      setRides(todayRides);
-        }   
+        } else {
+          const todayRides = rideList.filter((ride) => ride.datetime.includes(today));
+          setRides(todayRides);
+        }
       } catch (error) {
         console.error("Error fetching rides:", error);
       }
@@ -58,27 +59,35 @@ const RideList: React.FC = () => {
   }, [showAllRides]);
 
   const handleSearch = async () => {
+    setLoading(true);
+    const p = pickupQuery.trim().toLowerCase();
+    const d = dropQuery.trim().toLowerCase();
+    const kw = keywords.trim().toLowerCase();
+    const dateStr = selectedDate.trim();
+
+    // Simple search
     if (!smart) {
-      const query = searchQuery.toLowerCase().trim();
-      const date = selectedDate.trim();
       const filtered = allRides.filter((ride) => {
-        const matchesSearch =
-          ride.pickup.toLowerCase().includes(query) ||
-          ride.drop.toLowerCase().includes(query) ||
-          ride.name.toLowerCase().includes(query);
-        const matchesDate = date ? ride.datetime.includes(date) : true;
-        return matchesSearch && matchesDate;
+        const mPickup = p ? ride.pickup.toLowerCase().includes(p) : true;
+        const mDrop = d ? ride.drop.toLowerCase().includes(d) : true;
+        const mKw = kw
+          ? ride.pickup.toLowerCase().includes(kw) ||
+            ride.drop.toLowerCase().includes(kw) ||
+            ride.name.toLowerCase().includes(kw) ||
+            (ride.notes || "").toLowerCase().includes(kw)
+          : true;
+        const mDate = dateStr ? ride.datetime.includes(dateStr) : true;
+        return mPickup && mDrop && mKw && mDate;
       });
       setRides(filtered);
+      setLoading(false);
       return;
     }
 
-    // Smart Match using embeddings
-    const qText = rideToText({
-      pickup: searchQuery || "",
-      drop: searchQuery || "",
-      datetime: selectedDate,
-    });
+    // Smart Match
+    const qText =
+      rideToText({ pickup: pickupQuery, drop: dropQuery, datetime: selectedDate }) +
+      (kw ? ` Keywords: ${kw}` : "");
     try {
       const qRes = await fetch("/api/ai/embedding", {
         method: "POST",
@@ -86,18 +95,31 @@ const RideList: React.FC = () => {
         body: JSON.stringify({ text: qText }),
       }).then((r) => r.json());
       const q: number[] = Array.isArray(qRes.embedding) ? qRes.embedding : [];
+      const wSim = 1.0; // embedding similarity weight
+      const wPickup = 0.25; // string pickup match boost
+      const wDrop = 0.25; // string drop match boost
+      const wDate = 0.10; // same-day boost
+
       const ranked = [...(allRides as RideWithAI[])]
         .map((r) => {
           const e = r.ai?.embedding as number[] | undefined;
           const sim = e?.length ? cosineSim(q, e) : 0;
-          const dateBoost = selectedDate && r.datetime.includes(selectedDate) ? 0.05 : 0;
-          return { r, score: sim + dateBoost };
+          const pickEq = p ? r.pickup.toLowerCase().includes(p) : false;
+          const dropEq = d ? r.drop.toLowerCase().includes(d) : false;
+          const dateBoost = dateStr && r.datetime.includes(dateStr) ? 1 : 0;
+          // Additional small bonus if route key matches exactly
+          const keyMatch = p && d && normalizeRouteKey(r.pickup, r.drop) === normalizeRouteKey(pickupQuery, dropQuery) ? 0.15 : 0;
+          const score = wSim * sim + wPickup * (pickEq ? 1 : 0) + wDrop * (dropEq ? 1 : 0) + wDate * dateBoost + keyMatch;
+          return { r, score, reasons: { pickEq, dropEq, date: !!dateBoost, key: keyMatch > 0 } };
         })
         .sort((a, b) => b.score - a.score)
-        .map((x) => x.r);
-      setRides(ranked.slice(0, 30));
+        .map((x, i) => ({ ...x, rank: i + 1 }))
+        .slice(0, 36);
+      setRides(ranked.map((x) => x.r));
     } catch (err) {
       console.error("Smart search failed", err);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -112,112 +134,110 @@ const RideList: React.FC = () => {
   return (
     <div className="min-h-screen bg-white pt-20 pb-12">
       <div className="max-w-6xl mx-auto px-6">
-        {/* Search Bar */}
-        <div className="bg-white rounded-xl shadow-lg p-6 mb-12 w-full border border-gray-300 pb-10 pt-10">
-          <div className="flex flex-col md:flex-row items-center gap-4">
-            {/* Search input */}
-            <div className="flex-1 relative w-full">
+        <div className="bg-white rounded-xl shadow-lg p-6 mb-8 w-full border border-gray-200">
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
+            {/* Pickup */}
+            <div className="md:col-span-4">
+              <label className="block text-xs text-gray-600 mb-1">Pickup</label>
               <input
                 type="text"
-                placeholder="Search by pickup/drop/name"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-orange-500 bg-white"
+                placeholder="e.g., Campus Main Gate"
+                value={pickupQuery}
+                onChange={(e) => setPickupQuery(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-orange-500"
               />
-              <svg
-                onClick={handleSearch} // Search instantly on click
-                className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400 cursor-pointer hover:text-gray-600"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-                />
-              </svg>
+            </div>
+            {/* Drop */}
+            <div className="md:col-span-4">
+              <label className="block text-xs text-gray-600 mb-1">Drop</label>
+              <input
+                type="text"
+                placeholder="e.g., Bhubaneswar Airport"
+                value={dropQuery}
+                onChange={(e) => setDropQuery(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-orange-500"
+              />
+            </div>
+            {/* Keywords */}
+            <div className="md:col-span-4">
+              <label className="block text-xs text-gray-600 mb-1">Keywords (optional)</label>
+              <input
+                type="text"
+                placeholder="e.g., morning, airport, 3 seats"
+                value={keywords}
+                onChange={(e) => setKeywords(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-orange-500"
+              />
             </div>
 
-            {/* Date picker */}
-            <div className="relative w-full md:w-auto">
-              <input
-                type="text"
-                placeholder="dd-mm-yyyy"
-                value={selectedDate}
-                readOnly // prevent manual typing
-                className="w-full md:w-auto pl-4 pr-10 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-orange-500 bg-white"
-              />
-              {/* Hidden date input */}
+            {/* Date */}
+            <div className="md:col-span-3">
+              <label className="block text-xs text-gray-600 mb-1">Date</label>
               <input
                 type="date"
-                ref={dateInputRef}
-                className="hidden"
+                value={selectedDate}
                 onChange={(e) => {
-                  const dateValue = e.target.value;
-                  setSelectedDate(dateValue);
-                  handleSearch(); // auto filter on date change
+                  setSelectedDate(e.target.value);
                 }}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-orange-500"
               />
-              <svg
-                onClick={() => dateInputRef.current?.showPicker()} // open calendar
-                className="absolute right-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400 cursor-pointer hover:text-gray-600"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"
-                />
-              </svg>
             </div>
-            <div className="flex justify-end">
+
+            {/* Toggles */}
+            <div className="md:col-span-6 flex items-center gap-4">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={smart} onChange={() => setSmart(!smart)} />
+                <span className="select-none">AI Smart Match</span>
+              </label>
               <button
                 onClick={() => setShowAllRides(!showAllRides)}
-                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl"
+                className="px-4 py-2 border border-amber-600 text-amber-700 hover:bg-amber-50 rounded-lg text-sm"
               >
-               {showAllRides ? "Show Today's Rides" : "Show All Rides"}
+                {showAllRides ? "Show Today's Rides" : "Show All Rides"}
               </button>
-           </div>
-            {/* Smart toggle */}
-            <label className="flex items-center gap-2 text-sm text-gray-600">
-              <input type="checkbox" checked={smart} onChange={() => setSmart(!smart)} />
-              AI Smart Match
-            </label>
+            </div>
 
-            {/* Search button */}
-            <button
-              onClick={handleSearch}
-              className="w-full md:w-auto bg-amber-600 hover:bg-amber-700 text-white 
-              px-6 py-2 rounded-xl font-medium transition duration-300"
-            >
-              {smart ? "Smart Match" : "Search"}
-            </button>
+            {/* Search */}
+            <div className="md:col-span-3 flex justify-end">
+              <button
+                onClick={handleSearch}
+                disabled={loading}
+                className="w-full md:w-auto bg-amber-600 hover:bg-amber-700 disabled:opacity-60 text-white px-6 py-2 rounded-xl font-medium transition duration-300"
+              >
+                {loading ? "Searching…" : smart ? "Smart Match" : "Search"}
+              </button>
+            </div>
           </div>
+
+          {/* No datalist suggestions */}
         </div>
 
-        {/* Ride Cards Grid */}
+        {!loading && rides.length === 0 && (
+          <div className="text-center text-gray-600 mb-8">
+            No rides found. Try adjusting pickup, drop, or date.
+          </div>
+        )}
+
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {rides.map((ride) => (
-            <div
-              key={ride.id}
-              className="bg-white rounded-2xl shadow-sm p-6 hover:shadow-md transition duration-300 border border-gray-200"
-            >
-              <div className="flex items-center gap-2 mb-4">
+          {rides.map((ride, idx) => (
+            <div key={ride.id} className="border border-gray-200 rounded-xl p-5 shadow-sm bg-white">
+              <div className="flex items-center gap-2 mb-3">
                 <svg className="w-5 h-5 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 12.414a4 4 0 10-5.657 5.657l4.243 4.243a8 8 0 1111.314-11.314l-4.243 4.243" />
                 </svg>
-                <div className="flex items-center">
-                  <span className="font-semibold">{ride.pickup}</span>
-                  <svg className="w-4 h-4 mx-2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                  </svg>
-                  <span className="font-semibold">{ride.drop}</span>
-                </div>
+                <span className="font-semibold">{ride.pickup}</span>
+                <svg className="w-4 h-4 mx-2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+                <span className="font-semibold">{ride.drop}</span>
+                {smart && idx < 3 && (
+                  <span className="ml-auto text-[10px] uppercase tracking-wide bg-amber-100 text-amber-700 px-2 py-1 rounded-full">
+                    Top match
+                  </span>
+                )}
               </div>
 
               <div className="flex items-center gap-2 mb-2">
@@ -227,11 +247,26 @@ const RideList: React.FC = () => {
                 <span className="text-gray-600 text-sm">{ride.datetime.replace("T", ", ")}</span>
               </div>
 
-              <div className="flex items-center gap-2 mb-6">
+              {/* Match badges */}
+              {smart && (
+                <div className="flex flex-wrap gap-2 mb-4">
+                  {pickupQuery && ride.pickup.toLowerCase().includes(pickupQuery.toLowerCase()) && (
+                    <span className="text-[11px] bg-green-50 text-green-700 border border-green-200 px-2 py-0.5 rounded-full">Pickup match</span>
+                  )}
+                  {dropQuery && ride.drop.toLowerCase().includes(dropQuery.toLowerCase()) && (
+                    <span className="text-[11px] bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded-full">Drop match</span>
+                  )}
+                  {selectedDate && ride.datetime.includes(selectedDate) && (
+                    <span className="text-[11px] bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded-full">Same day</span>
+                  )}
+                </div>
+              )}
+
+              <div className="flex items-center gap-2 mb-4">
                 <svg className="w-5 h-5 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                 </svg>
-                <span className="text-gray-600 text-sm">Seats available: {ride.seats}</span>
+                <span className="text-gray-700 text-sm">Seats available: {ride.seats}</span>
               </div>
 
               <div className="flex justify-between gap-4">
@@ -258,15 +293,18 @@ const RideList: React.FC = () => {
         <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-40 z-50">
           <div className="bg-white rounded-xl shadow-lg p-6 w-96">
             <h2 className="text-xl font-bold mb-4">Ride Details</h2>
-            <p><span className="font-semibold">Name:</span> {selectedRide.name}</p>
-            <p><span className="font-semibold">Contact:</span> {selectedRide.phone}</p>
-            <p><span className="font-semibold">Notes:</span> {selectedRide.notes || "No notes"}</p>
+            <p>
+              <span className="font-semibold">Name:</span> {selectedRide.name}
+            </p>
+            <p>
+              <span className="font-semibold">Contact:</span> {selectedRide.phone}
+            </p>
+            <p>
+              <span className="font-semibold">Notes:</span> {selectedRide.notes || "No notes"}
+            </p>
 
             <div className="mt-6 flex justify-end">
-              <button
-                onClick={closeModal}
-                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg"
-              >
+              <button onClick={closeModal} className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg">
                 Close
               </button>
             </div>
